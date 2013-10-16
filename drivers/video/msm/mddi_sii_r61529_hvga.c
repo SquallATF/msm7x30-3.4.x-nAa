@@ -3,6 +3,7 @@
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
  *
  * Author: Macro Luo <macro.luo@sonyericsson.com>
+ * Adapted for SEMC 2011 devices by Michael Bestas <mikeioannina@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2, as
@@ -19,20 +20,65 @@
 #include <generated/autoconf.h>
 #include <linux/mddi_sii_r61529_hvga.h>
 
+#define REFRESH_RATE 6500
+
 /* Internal version number */
 #define MDDI_DRIVER_VERSION 0x0004
 
-/* DISPLAY ID value */
-#define MDDI_SII_CELL_ID 0xFA
-
-/* DISPLAY DRIVERIC ID value */
+/* Driver_IC_ID value for display */
 #define MDDI_SII_DISPLAY_DRIVER_IC_ID 0x06
-
-/* Frame time, used for delays */
-#define MDDI_FRAME_TIME 13
 
 #define POWER_OFF 0
 #define POWER_ON  1
+
+/* Function protos */
+static ssize_t show_driver_version(
+	struct device *pdev,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t show_dbc_ctrl(
+	struct device *pdev,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t store_dbc_ctrl(
+	struct device *pdev,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count);
+
+static ssize_t show_dbc_mode_ctrl(
+	struct device *dev_p,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t store_dbc_mode_ctrl(
+	struct device *dev_p,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count);
+
+/* Function Configuration */
+#define DBC_OFF 0
+#define DBC_ON	1
+
+static int dbc_ctrl = DBC_ON;
+module_param(dbc_ctrl, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(dbc_ctrl, "Dynamic Backlight Control DBC_OFF = 0, DBC_ON = 1");
+
+#define DBC_MODE_UI	1
+#define DBC_MODE_IMAGE	2
+#define DBC_MODE_VIDEO	3
+
+static int dbc_mode = DBC_MODE_VIDEO;
+module_param(dbc_mode, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(dbc_ctrl, "Dynamic Backlight Mode DBC_MODE_UI = 1, DBC_MODE_IMAGE = 2, DBC_MODE_VIDEO = 3");
+
+/* driver attributes */
+static DEVICE_ATTR(display_driver_version, 0444, show_driver_version, NULL);
+static DEVICE_ATTR(dbc_ctrl, 0644, show_dbc_ctrl, store_dbc_ctrl);
+static DEVICE_ATTR(dbc_mode, 0644, show_dbc_mode_ctrl, store_dbc_mode_ctrl);
 
 enum lcd_registers {
 	LCD_REG_COLUMN_ADDRESS = 0x2a,
@@ -63,6 +109,7 @@ struct panel_ids {
 	u32 revision_id;
 };
 
+static struct msm_fb_panel_data sii_hvga_panel_data;
 
 struct sii_record {
 	struct sii_hvga_platform_data *pdata;
@@ -88,19 +135,9 @@ static u32 dbc_control_off_data[DBC_CONTROL_SIZE] = {
 		0x00000010, 0x00000037, 0x0000005A, 0x00000087, 0X000000BE,
 		0x000000FF, 0x00000000, 0x00000000, 0x00000000, 0X00000000};
 
-#ifdef MDDI_SII_DISPLAY_INITIAL
-#define GAMMA_SETTING_SIZE 6
-static u32 gamma_setting_A[GAMMA_SETTING_SIZE] = {
-	0x1F150C00, 0x273B482E, 0x0104101A, 0x1F150C00, 0x273B482E, 0x0104101A};
-static u32 gamma_setting_B[GAMMA_SETTING_SIZE] = {
-	0x1F150C00, 0x273B482E, 0x0104101A, 0x1F150C00, 0x273B482E, 0x0104101A};
-static u32 gamma_setting_C[GAMMA_SETTING_SIZE] = {
-	0x1F150C00, 0x273B482E, 0x0104101A, 0x1F150C00, 0x273B482E, 0x0104101A};
-#endif
-
-static void sii_lcd_dbc_on(struct sii_record *rd)
+static void sii_lcd_dbc_on(void)
 {
-	if (rd->pdata->dbc_on) {
+	if (dbc_ctrl) {
 		/* Manufacture Command Access Protect */
 		mddi_queue_register_write(0xB0, 0x04, TRUE, 0);
 
@@ -118,9 +155,9 @@ static void sii_lcd_dbc_on(struct sii_record *rd)
 	}
 }
 
-static void sii_lcd_dbc_off(struct sii_record *rd)
+static void sii_lcd_dbc_off(void)
 {
-	if (rd->pdata->dbc_on) {
+	if (dbc_ctrl) {
 		/* Manufacture Command Access Protect */
 		mddi_queue_register_write(0xB0, 0x04, TRUE, 0);
 
@@ -149,117 +186,14 @@ static void sii_lcd_window_address_set(enum lcd_registers reg,
 	mddi_queue_register_write(reg, para, TRUE, 0);
 }
 
-#ifdef MDDI_SII_DISPLAY_INITIAL
-static void sii_lcd_driver_init(struct platform_device *pdev)
-{
-	struct msm_fb_panel_data *panel;
-
-	if (pdev) {
-		panel = (struct msm_fb_panel_data *)pdev->dev.platform_data;
-
-		/* Manufacture Command Access Protect */
-		mddi_queue_register_write(0xB0, 0x04, TRUE, 0);
-
-		/* Frame Memory Acess and Interface Setting */
-		mddi_host_register_write16(0xB3, 0x00000002, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Display mode and Frame memory write mode */
-		mddi_queue_register_write(0xB4, 0x00, TRUE, 0);
-
-		/* DSI Control */
-		mddi_host_register_write16(0xB6, 0x00008351, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* MDDI Control */
-		mddi_host_register_write16(0xB7, 0x21110000, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Backlight control1 set */
-		mddi_host_register_write_xl(0xB8, dbc_control_on_data,
-			DBC_CONTROL_SIZE, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Backlight control2 set */
-		mddi_host_register_write16(0xB9, 0x00000000, 0x000000F2,
-			0x00000001, 0x00000008, 4,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Display Timing Setting for Normal Mode*/
-		mddi_host_register_write16(0xC1, 0x08082707, 0x00000030,
-			0, 0, 2, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Source/Gate Diving Timing Setting */
-		mddi_host_register_write16(0xC4, 0x03030040, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* DPI Polarity Control */
-		mddi_queue_register_write(0xC6, 0x00, TRUE, 0);
-
-		/* Gamma Setting A set */
-		mddi_host_register_write_xl(0xC8, gamma_setting_A,
-			GAMMA_SETTING_SIZE, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Gamma Setting B set */
-		mddi_host_register_write_xl(0xC9, gamma_setting_B,
-			GAMMA_SETTING_SIZE, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Gamma Setting C set */
-		mddi_host_register_write_xl(0xCA, gamma_setting_C,
-			GAMMA_SETTING_SIZE, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Power Setting */
-		mddi_host_register_write16(0xD0, 0x200806A9, 0x0001043C,
-			0x06000108, 0x20000001, 4,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* VCOM Setting */
-		mddi_host_register_write16(0xD1, 0x00202000, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* NV Memory Access Control */
-		mddi_host_register_write16(0xE0, 0x00000000, 0, 0, 0, 1,
-			TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* Set_DDB Write Control */
-		mddi_host_register_write16(0xE1, 0x01010101, 0x00000000,
-			0, 0, 2, TRUE, NULL, MDDI_HOST_PRIM);
-
-		/* NV Memory Load Control */
-		mddi_queue_register_write(0xE2, 0xFF, TRUE, 0);
-
-		/* Manufacture Command Access Protect */
-		mddi_queue_register_write(0xB0, 0x03, TRUE, 0);
-	}
-}
-#endif
-
 static void sii_lcd_window_adjust(uint16 x1, uint16 x2,
 					uint16 y1, uint16 y2)
 {
 	sii_lcd_window_address_set(LCD_REG_COLUMN_ADDRESS, x1, x2);
 	sii_lcd_window_address_set(LCD_REG_PAGE_ADDRESS, y1, y2);
+
+	/* Workaround: 0x3Ch at start of column bug */
 	mddi_queue_register_write(0x3C, 0x00, TRUE, 0);
-}
-
-static void sii_lcd_exit_sleep(struct sii_record *rd)
-{
-	/* Page Address Set */
-	mddi_queue_register_write(0x2A, 0x0000013F, TRUE, 0);
-	mddi_queue_register_write(0x2B, 0x000001DF, TRUE, 0);
-
-	/*Address Mode Set */
-	mddi_queue_register_write(0x36, 0x00, TRUE, 0);
-
-	/*Pixle Format Set */
-	mddi_queue_register_write(0x3A, 0x77, TRUE, 0);
-
-	/* Exit sleep mode */
-	mddi_queue_register_write(0x11, 0x00, TRUE, 0);
-
-	mddi_wait(110);/* >108ms */
-
-	/* Set tear on */
-	mddi_queue_register_write(0x35, 0x00, TRUE, 0);
 }
 
 static void sii_lcd_enter_sleep(void)
@@ -272,13 +206,36 @@ static void sii_lcd_enter_sleep(void)
 	mddi_wait(100);/* >90ms */
 }
 
+static void sii_lcd_exit_sleep(struct sii_record *rd)
+{
+	/* Set page address */
+	mddi_queue_register_write(0x2A, 0x0000013F, TRUE, 0);
+	mddi_queue_register_write(0x2B, 0x000001DF, TRUE, 0);
+
+	/* Set address mode */
+	mddi_queue_register_write(0x36, 0x00, TRUE, 0);
+
+	/* Set pixel format */
+	mddi_queue_register_write(0x3A, 0x77, TRUE, 0);
+
+	/* Exit sleep mode */
+	mddi_queue_register_write(0x11, 0x00, TRUE, 0);
+
+	mddi_wait(110);/* >108ms */
+
+	/* Set tear on */
+	mddi_queue_register_write(0x35, 0x00, TRUE, 0);
+}
+
 static void sii_lcd_display_on(void)
 {
+	/* Display on */
 	mddi_queue_register_write(0x29, 0x00, TRUE, 0);
 }
 
 static void sii_lcd_display_off(void)
 {
+	/* Display off */
 	mddi_queue_register_write(0x28, 0x00, TRUE, 0);
 	mddi_wait(21); /* >20 ms */
 }
@@ -350,20 +307,14 @@ static int mddi_sii_ic_on_panel_off(struct platform_device *pdev)
 
 		case LCD_STATE_POWER_ON:
 			sii_lcd_exit_sleep(rd);
-#ifdef MDDI_SII_DISPLAY_INITIAL
-			sii_lcd_driver_init(pdev);
-#endif
-			sii_lcd_dbc_on(rd);
+			sii_lcd_dbc_on();
 			rd->lcd_state = LCD_STATE_DISPLAY_OFF;
 			break;
 
 		case LCD_STATE_SLEEP:
 			sii_lcd_exit_deepstandby(rd);
 			sii_lcd_exit_sleep(rd);
-#ifdef MDDI_SII_DISPLAY_INITIAL
-			sii_lcd_driver_init(pdev);
-#endif
-			sii_lcd_dbc_on(rd);
+			sii_lcd_dbc_on();
 			rd->lcd_state = LCD_STATE_DISPLAY_OFF;
 			break;
 
@@ -392,10 +343,7 @@ static int mddi_sii_ic_on_panel_on(struct platform_device *pdev)
 		switch (rd->lcd_state) {
 		case LCD_STATE_POWER_ON:
 			sii_lcd_exit_sleep(rd);
-#ifdef MDDI_SII_DISPLAY_INITIAL
-			sii_lcd_driver_init(pdev);
-#endif
-			sii_lcd_dbc_on(rd);
+			sii_lcd_dbc_on();
 			sii_lcd_display_on();
 			rd->lcd_state = LCD_STATE_ON;
 			break;
@@ -403,10 +351,7 @@ static int mddi_sii_ic_on_panel_on(struct platform_device *pdev)
 		case LCD_STATE_SLEEP:
 			sii_lcd_exit_deepstandby(rd);
 			sii_lcd_exit_sleep(rd);
-#ifdef MDDI_SII_DISPLAY_INITIAL
-			sii_lcd_driver_init(pdev);
-#endif
-			sii_lcd_dbc_on(rd);
+			sii_lcd_dbc_on();
 			sii_lcd_display_on();
 			rd->lcd_state = LCD_STATE_ON;
 			break;
@@ -446,7 +391,7 @@ static int mddi_sii_ic_off_panel_off(struct platform_device *pdev)
 
 		case LCD_STATE_ON:
 			sii_lcd_display_off();
-			sii_lcd_dbc_off(rd);
+			sii_lcd_dbc_off();
 			sii_lcd_enter_sleep();
 			sii_lcd_enter_deepstandby();
 			rd->lcd_state = LCD_STATE_SLEEP;
@@ -458,7 +403,7 @@ static int mddi_sii_ic_off_panel_off(struct platform_device *pdev)
 			break;
 
 		case LCD_STATE_DISPLAY_OFF:
-			sii_lcd_dbc_off(rd);
+			sii_lcd_dbc_off();
 			sii_lcd_enter_sleep();
 			sii_lcd_enter_deepstandby();
 			rd->lcd_state = LCD_STATE_SLEEP;
@@ -476,7 +421,7 @@ error:
 	return 0;
 }
 
-static ssize_t show_driver_info(struct device *dev_p,
+static ssize_t show_driver_version(struct device *dev_p,
 			struct device_attribute *attr,
 			char *buf)
 {
@@ -484,16 +429,124 @@ static ssize_t show_driver_info(struct device *dev_p,
 							MDDI_DRIVER_VERSION);
 }
 
-/* driver attributes */
-static DEVICE_ATTR(display_driver_info, 0444, show_driver_info, NULL);
+static ssize_t show_dbc_ctrl(struct device *dev_p,
+			struct device_attribute *attr,
+			char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%i\n", dbc_ctrl);
+}
+
+static ssize_t store_dbc_ctrl(struct device *dev_p,
+			struct device_attribute *attr,
+			const char *buf,
+			size_t count)
+{
+	ssize_t ret;
+	struct sii_record *rd;
+
+	rd = kzalloc(sizeof(struct sii_record), GFP_KERNEL);
+	if (rd == NULL) {
+		ret = -ENOMEM;
+		goto exit_point;
+	}
+
+	mutex_lock(&rd->mddi_mutex);
+
+	if (sscanf(buf, "%i", &ret) != 1) {
+		pr_err("%s: mddi_sii_hvga: "
+			"Invalid flag for dbc ctrl\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	if (ret)
+		dbc_ctrl = 1;
+	else
+		dbc_ctrl = 0;
+
+	ret = strnlen(buf, count);
+
+unlock:
+	mutex_unlock(&rd->mddi_mutex);
+exit_point:
+	return ret;
+}
+
+static ssize_t show_dbc_mode_ctrl(struct device *dev_p,
+				struct device_attribute *attr,
+				char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%i\n", dbc_mode);
+}
+
+static ssize_t store_dbc_mode_ctrl(struct device *dev_p,
+				struct device_attribute *attr,
+				const char *buf,
+				size_t count)
+{
+	ssize_t ret;
+	struct sii_record *rd;
+
+	rd = kzalloc(sizeof(struct sii_record), GFP_KERNEL);
+	if (rd == NULL) {
+		ret = -ENOMEM;
+		goto exit_point;
+	}
+
+	mutex_lock(&rd->mddi_mutex);
+
+	if (sscanf(buf, "%i", &ret) != 1) {
+		pr_err("%s: mddi_sii_hvga: "
+			"Invalid flag for dbc mode\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	switch (ret) {
+	case DBC_MODE_UI:
+	case DBC_MODE_IMAGE:
+	case DBC_MODE_VIDEO:
+		dbc_mode = ret;
+		break;
+	default:
+		pr_err("%s: mddi_sii_hvga: "
+			"Invalid value for dbc mode\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	if (rd->lcd_state != LCD_STATE_ON) {
+		pr_err("%s: mddi_sii_hvga: LCD in sleep, "
+			"not performing any dbc change\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	ret = strnlen(buf, count);
+
+unlock:
+	mutex_unlock(&rd->mddi_mutex);
+exit_point:
+	return ret;
+}
 
 static void lcd_attribute_register(struct platform_device *pdev)
 {
 	int ret;
 
-	ret = device_create_file(&pdev->dev, &dev_attr_display_driver_info);
+	ret = device_create_file(&pdev->dev, &dev_attr_display_driver_version);
 	if (ret != 0)
 		dev_err(&pdev->dev, "Failed to register display_driver_version"
+						"attributes (%d)\n", ret);
+
+	ret = device_create_file(&pdev->dev, &dev_attr_dbc_ctrl);
+	if (ret != 0)
+		dev_err(&pdev->dev, "Failed to register dbc_ctrl"
+						"attributes (%d)\n", ret);
+
+	ret = device_create_file(&pdev->dev, &dev_attr_dbc_mode);
+	if (ret != 0)
+		dev_err(&pdev->dev, "Failed to register dbc_mode"
 						"attributes (%d)\n", ret);
 }
 
@@ -507,13 +560,15 @@ static int check_panel_ids(struct sii_record *rd)
 					&rd->pid.driver_ic_id,
 					1, MDDI_HOST_PRIM);
 	if (ret < 0) {
-		pr_err("mddi_sii_hvga: Failed to read Display ID\n");
+		dev_err(&rd->pdev->dev, "%s: mddi_sii_hvga: "
+			"Failed to read Display ID\n", __func__);
 		ret = -ENODEV;
 		goto error;
 	}
 	if ((rd->pid.driver_ic_id & 0xFF) !=
 			MDDI_SII_DISPLAY_DRIVER_IC_ID) {
-		pr_err("mddi_sii_hvga: Detected a non-Sii display\n");
+		dev_err(&rd->pdev->dev, "%s: mddi_sii_hvga: "
+			"Detected a non-Sii display\n", __func__);
 		ret = -ENODEV;
 		goto error;
 	}
@@ -522,16 +577,17 @@ static int check_panel_ids(struct sii_record *rd)
 					&rd->pid.module_id,
 					1, MDDI_HOST_PRIM);
 	if (ret < 0)
-		pr_err("mddi_sii_hvga: Failed to read LCD_REG_MODULE_ID\n");
+		dev_err(&rd->pdev->dev, "%s: mddi_sii_hvga: "
+			"Failed to read LCD_REG_MODULE_ID\n", __func__);
 
 	ret = mddi_host_register_read(LCD_REG_REVISION_ID,
 					&rd->pid.revision_id,
 					1, MDDI_HOST_PRIM);
 	if (ret < 0)
-		pr_err("mddi_sii_hvga: "
-				"Failed to read LCD_REG_REVISION_ID\n");
+		dev_err(&rd->pdev->dev, "%s: mddi_sii_hvga: "
+			"Failed to read LCD_REG_REVISION_ID\n", __func__);
 
-	pr_info("Found display with module ID = 0x%x, "
+	dev_info(&rd->pdev->dev, "Found display with module ID = 0x%x, "
 			"revision ID = 0x%x, driver IC ID = 0x%x, "
 			"driver ID = 0x%x\n",
 			rd->pid.module_id & 0xFF,
@@ -548,6 +604,7 @@ static int mddi_sii_lcd_probe(struct platform_device *pdev)
 {
 	int ret = -ENODEV;
 	struct sii_record *rd;
+	struct msm_fb_panel_data *panel_data;
 
 	if (!pdev) {
 		dev_err(&pdev->dev, "%s: no platform_device\n", __func__);
@@ -571,27 +628,19 @@ static int mddi_sii_lcd_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, rd);
 	mutex_init(&rd->mddi_mutex);
 
+	panel_data = &sii_hvga_panel_data;
+
 	if (!check_panel_ids(rd)) {
 		rd->lcd_state = LCD_STATE_POWER_ON;
 		rd->power_ctrl = POWER_ON;
 
-		rd->pdata->panel_data->panel_info.mddi.vdopkt =
-						MDDI_DEFAULT_PRIM_PIX_ATTR;
-		rd->pdata->panel_data->panel_info.lcd.vsync_enable = TRUE;
-		rd->pdata->panel_data->panel_info.lcd.refx100 = 6500;
-		rd->pdata->panel_data->panel_info.lcd.v_back_porch = 8;
-		rd->pdata->panel_data->panel_info.lcd.v_front_porch = 8;
-		rd->pdata->panel_data->panel_info.lcd.v_pulse_width = 0;
-		rd->pdata->panel_data->panel_info.lcd.hw_vsync_mode = TRUE;
-		rd->pdata->panel_data->panel_info.lcd.vsync_notifier_period = 0;
-		rd->pdata->panel_data->on  = mddi_sii_ic_on_panel_off;
-		rd->pdata->panel_data->controller_on_panel_on =
-						mddi_sii_ic_on_panel_on;
-		rd->pdata->panel_data->off = mddi_sii_ic_off_panel_off;
-		rd->pdata->panel_data->window_adjust =
-						sii_lcd_window_adjust;
-		rd->pdata->panel_data->power_on_panel_at_pan = 0;
-		pdev->dev.platform_data = rd->pdata->panel_data;
+		panel_data->on = mddi_sii_ic_on_panel_off;
+		panel_data->controller_on_panel_on = mddi_sii_ic_on_panel_on;
+		panel_data->off = mddi_sii_ic_off_panel_off;
+		panel_data->window_adjust = sii_lcd_window_adjust;
+		panel_data->power_on_panel_at_pan = 0;
+
+		pdev->dev.platform_data = &sii_hvga_panel_data;
 
 		/* adds mfd on driver_data */
 		msm_fb_add_device(pdev);
@@ -612,9 +661,13 @@ static int __devexit mddi_sii_lcd_remove(struct platform_device *pdev)
 {
 	struct sii_record *rd;
 
-	device_remove_file(&pdev->dev, &dev_attr_display_driver_info);
+	device_remove_file(&pdev->dev, &dev_attr_display_driver_version);
+	device_remove_file(&pdev->dev, &dev_attr_dbc_ctrl);
+	device_remove_file(&pdev->dev, &dev_attr_dbc_mode);
+
 	rd = platform_get_drvdata(pdev);
-	kfree(rd);
+	if (rd)
+		kfree(rd);
 	return 0;
 };
 
@@ -626,8 +679,38 @@ static struct platform_driver this_driver = {
 	},
 };
 
+static void __init msm_mddi_sii_hvga_display_device_init(void)
+{
+	struct msm_fb_panel_data *panel_data = &sii_hvga_panel_data;
+
+	panel_data->panel_info.xres = 320;
+	panel_data->panel_info.yres = 480;
+	panel_data->panel_info.pdest = DISPLAY_1;
+	panel_data->panel_info.type = MDDI_PANEL;
+	panel_data->panel_info.mddi.vdopkt = MDDI_DEFAULT_PRIM_PIX_ATTR;
+	panel_data->panel_info.wait_cycle = 0;
+	panel_data->panel_info.bpp = 24;
+	panel_data->panel_info.clk_rate = 192000000;
+	panel_data->panel_info.clk_min = 190000000;
+	panel_data->panel_info.clk_max = 200000000;
+	panel_data->panel_info.fb_num = 2;
+	panel_data->panel_info.bl_max = 4;
+	panel_data->panel_info.bl_min = 1;
+	panel_data->panel_info.width = 42;
+	panel_data->panel_info.height = 63;
+
+	panel_data->panel_info.lcd.vsync_enable = TRUE;
+	panel_data->panel_info.lcd.refx100 = REFRESH_RATE;
+	panel_data->panel_info.lcd.v_back_porch = 8;
+	panel_data->panel_info.lcd.v_front_porch = 8;
+	panel_data->panel_info.lcd.v_pulse_width = 0;
+	panel_data->panel_info.lcd.hw_vsync_mode = TRUE;
+	panel_data->panel_info.lcd.vsync_notifier_period = 0;
+}
+
 static int __init mddi_sii_lcd_init(void)
 {
+	msm_mddi_sii_hvga_display_device_init();
 	return platform_driver_register(&this_driver);
 }
 

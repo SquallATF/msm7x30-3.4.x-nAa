@@ -3,6 +3,7 @@
  * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
  *
  * Author: Macro Luo <macro.luo@sonyericsson.com>
+ * Adapted for SEMC 2011 devices by Michael Bestas <mikeioannina@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2, as
@@ -18,13 +19,17 @@
 #include <linux/mutex.h>
 #include <generated/autoconf.h>
 #include <linux/mddi_auo_s6d05a1_hvga.h>
-#include <asm/byteorder.h>
+
+#define REFRESH_RATE 6500
 
 /* Internal version number */
 #define MDDI_DRIVER_VERSION 0x0003
 
 /* Driver_IC_ID value for display */
 #define MDDI_AUO_DISPLAY_DRIVER_IC_ID 0xF0
+
+#define POWER_OFF 0
+#define POWER_ON  1
 
 /* Byte order,  word0=P4P3P2P1, little endian */
 #define write_client_reg_nbr(__X, __Y0, __Y1, __Y2, __Y3, __NBR) \
@@ -34,6 +39,55 @@
 #define write_client_reg_xl(__X, __Y, __NBR) \
   mddi_host_register_write_xl(__X, __Y, __NBR, \
 			TRUE, NULL, MDDI_HOST_PRIM);
+
+/* Function protos */
+static ssize_t show_driver_version(
+	struct device *pdev,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t show_dbc_ctrl(
+	struct device *pdev,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t store_dbc_ctrl(
+	struct device *pdev,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count);
+
+static ssize_t show_dbc_mode_ctrl(
+	struct device *dev_p,
+	struct device_attribute *attr,
+	char *buf);
+
+static ssize_t store_dbc_mode_ctrl(
+	struct device *dev_p,
+	struct device_attribute *attr,
+	const char *buf,
+	size_t count);
+
+/* Function Configuration */
+#define DBC_OFF 0
+#define DBC_ON	1
+
+static int dbc_ctrl = DBC_ON;
+module_param(dbc_ctrl, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(dbc_ctrl, "Dynamic Backlight Control DBC_OFF = 0, DBC_ON = 1");
+
+#define DBC_MODE_UI	1
+#define DBC_MODE_IMAGE	2
+#define DBC_MODE_VIDEO	3
+
+static int dbc_mode = DBC_MODE_VIDEO;
+module_param(dbc_mode, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+MODULE_PARM_DESC(dbc_ctrl, "Dynamic Backlight Mode DBC_MODE_UI = 1, DBC_MODE_IMAGE = 2, DBC_MODE_VIDEO = 3");
+
+/* driver attributes */
+static DEVICE_ATTR(display_driver_version, 0444, show_driver_version, NULL);
+static DEVICE_ATTR(dbc_ctrl, 0644, show_dbc_ctrl, store_dbc_ctrl);
+static DEVICE_ATTR(dbc_mode, 0644, show_dbc_mode_ctrl, store_dbc_mode_ctrl);
 
 enum lcd_registers {
 	LCD_REG_COLUMN_ADDRESS = 0x2a,
@@ -57,6 +111,8 @@ struct panel_ids {
 	u32 revision_id;
 };
 
+static struct msm_fb_panel_data auo_hvga_panel_data;
+
 struct auo_record {
 	struct auo_hvga_platform_data *pdata;
 	struct mutex mddi_mutex;
@@ -66,9 +122,9 @@ struct auo_record {
 	struct panel_ids pid;
 };
 
-static void auo_lcd_dbc_on(struct auo_record *rd)
+static void auo_lcd_dbc_on(void)
 {
-	if (rd->pdata->dbc_on) {
+	if (dbc_ctrl) {
 		/* Manual brightness */
 		write_client_reg_nbr(0x51, 0x000000FF, 0, 0, 0, 1);
 
@@ -81,12 +137,11 @@ static void auo_lcd_dbc_on(struct auo_record *rd)
 		/* BL Control */
 		write_client_reg_nbr(0x53, 0x00000024, 0, 0, 0, 1);
 	}
-
 }
 
-static void auo_lcd_dbc_off(struct auo_record *rd)
+static void auo_lcd_dbc_off(void)
 {
-	if (rd->pdata->dbc_on) {
+	if (dbc_ctrl) {
 		/* Mobile Image Enhancement Mode */
 		write_client_reg_nbr(0x55, 0x00000000, 0, 0, 0, 1);
 
@@ -102,130 +157,30 @@ static void auo_lcd_window_address_set(enum lcd_registers reg,
 
 	para = start;
 	para = (para << 16) | (start + stop);
-#ifdef __LITTLE_ENDIAN
 	para = swab32(para);
-#endif
 	write_client_reg_nbr(reg, para, 0, 0, 0, 1);
 }
 
-static uint32 reg_disctl[5] = {0x08034E3B, 0x00080808, 0x00000808,
-			0x08540000, 0x00080808};
-
-static void auo_lcd_driver_init(void)
-{
-	/* Page Address Set */
-	write_client_reg_nbr(0x2A, 0x0000013F, 0, 0, 0, 1);
-	write_client_reg_nbr(0x2B, 0x000001DF, 0, 0, 0, 1);
-
-	/* PASSWD1 */
-	write_client_reg_nbr(0xF0, 0x00005A5A, 0, 0, 0, 1);
-
-	/* PASSWD2 */
-	write_client_reg_nbr(0xF1, 0x00005A5A, 0, 0, 0, 1);
-
-	/* DISCTL */
-	write_client_reg_xl(0xF2, reg_disctl, 5);
-
-	/* PWRCTL */
-	write_client_reg_nbr(0xF4, 0x00000008, 0x00000000,
-			0x00037900, 0x0000379, 4);
-
-	/* VCMCTL */
-	write_client_reg_nbr(0xF5, 0x00755D00, 0x00000300,
-			0x755D0004, 0, 3);
-
-	/* SRGCTL */
-	write_client_reg_nbr(0xF6, 0x03080004, 0x00010001,
-			0x00000000, 0, 2);
-
-	/* IFCTL */
-	write_client_reg_nbr(0xF7, 0x02108048, 0x00000000,
-			0, 0, 2);
-
-	/* PANELCTL */
-	write_client_reg_nbr(0xF8, 0x00000011, 0, 0, 0, 1);
-
-	/* WRDISBV */
-	write_client_reg_nbr(0x51, 0x000000FF, 0, 0, 0, 1);
-
-	/* WRCTRLD */
-	write_client_reg_nbr(0x53, 0x0000002C, 0, 0, 0, 1);
-
-	/* WRCABC */
-	write_client_reg_nbr(0x55, 0x00000003, 0, 0, 0, 1);
-
-	/* WRCABCMB */
-	write_client_reg_nbr(0x5E, 0x00000000, 0, 0, 0, 1);
-
-	/* MIECTRL */
-	write_client_reg_nbr(0xC0, 0x003F8080, 0, 0, 0, 1);
-
-	/* BCMODE */
-	write_client_reg_nbr(0xC1, 0x00000013, 0, 0, 0, 1);
-
-	/* GAMMSEL */
-	write_client_reg_nbr(0xF9, 0x00000024, 0, 0, 0, 1);
-
-	/* PGAMMACTL */
-	write_client_reg_nbr(0xFA, 0x1B040B0B, 0x291C1A19,
-			0x3F3F3C36, 0x00000011, 4);
-
-	/* GAMMSEL */
-	write_client_reg_nbr(0xF9, 0x00000022, 0, 0, 0, 1);
-
-	/* PGAMMACTL */
-	write_client_reg_nbr(0xFA, 0x1B050B0B, 0x25211F1D,
-			0x3F3F3B34, 0x00000000, 4);
-
-	/* GAMMSEL */
-	write_client_reg_nbr(0xF9, 0x00000021, 0, 0, 0, 1);
-
-	/* PGAMMACTL */
-	write_client_reg_nbr(0xFA, 0x3B000B0B, 0x1F2B3038,
-			0x373A382F, 0x0000004, 4);
-
-	/* COLMOD*/
-	write_client_reg_nbr(0x3A, 0x00000077, 0, 0, 0, 1);
-
-	/* MADCTL */
-	write_client_reg_nbr(0x36, 0x00000000, 0, 0, 0, 1);
-
-	/* TEON */
-	write_client_reg_nbr(0x35, 0x00000000, 0, 0, 0, 1);
-
-	/* PASET */
-	write_client_reg_nbr(0x2B, 0xDF010000, 0, 0, 0, 1);
-
-	/* CASET */
-	write_client_reg_nbr(0x2A, 0x3F010000, 0, 0, 0, 1);
-}
-
-static void auo_lcd_window_adjust(uint16 x1, uint16 x2, uint16 y1, uint16 y2)
+static void auo_lcd_window_adjust(uint16 x1, uint16 x2,
+					uint16 y1, uint16 y2)
 {
 	auo_lcd_window_address_set(LCD_REG_COLUMN_ADDRESS, x1, x2);
 	auo_lcd_window_address_set(LCD_REG_PAGE_ADDRESS, y1, y2);
+
 	/* Workaround: 0x3Ch at start of column bug */
 	write_client_reg_nbr(0x3C, 0, 0, 0, 0, 1);
 }
 
 static void auo_lcd_enter_sleep(void)
 {
-	/* Sleep in */
+	/* Enter sleep mode */
 	write_client_reg_nbr(0x10, 0, 0, 0, 0, 1);
 	mddi_wait(120); /* >120 ms */
 }
 
-static void auo_lcd_display_off(void)
+static void auo_lcd_exit_sleep(struct auo_record *rd)
 {
-	/* Display off */
-	write_client_reg_nbr(0x28, 0, 0, 0, 0, 1);
-	mddi_wait(50); /* >50 ms */
-}
-
-
-static void auo_lcd_exit_sleep(void)
-{
-	/* Sleep out */
+	/* Exit sleep mode */
 	write_client_reg_nbr(0x11, 0x00000000, 0, 0, 0, 1);
 	mddi_wait(120); /* >120 ms */
 }
@@ -236,6 +191,12 @@ static void auo_lcd_display_on(void)
 	write_client_reg_nbr(0x29, 0x00000000, 0, 0, 0, 1);
 }
 
+static void auo_lcd_display_off(void)
+{
+	/* Display off */
+	write_client_reg_nbr(0x28, 0, 0, 0, 0, 1);
+	mddi_wait(50); /* >50 ms */
+}
 
 static void auo_lcd_enter_deepstandby(void)
 {
@@ -287,7 +248,6 @@ static struct auo_record *get_auo_record_from_mfd(
 
 static int mddi_auo_ic_on_panel_off(struct platform_device *pdev)
 {
-
 	int ret = 0;
 	struct auo_record *rd;
 
@@ -306,17 +266,15 @@ static int mddi_auo_ic_on_panel_off(struct platform_device *pdev)
 			break;
 
 		case LCD_STATE_POWER_ON:
-			auo_lcd_driver_init();
-			auo_lcd_exit_sleep();
-			auo_lcd_dbc_on(rd);
+			auo_lcd_exit_sleep(rd);
+			auo_lcd_dbc_on();
 			rd->lcd_state = LCD_STATE_DISPLAY_OFF;
 			break;
 
 		case LCD_STATE_SLEEP:
 			auo_lcd_exit_deepstandby(rd);
-			auo_lcd_driver_init();
-			auo_lcd_exit_sleep();
-			auo_lcd_dbc_on(rd);
+			auo_lcd_exit_sleep(rd);
+			auo_lcd_dbc_on();
 			rd->lcd_state = LCD_STATE_DISPLAY_OFF;
 			break;
 
@@ -326,7 +284,7 @@ static int mddi_auo_ic_on_panel_off(struct platform_device *pdev)
 	}
 	mutex_unlock(&rd->mddi_mutex);
 error:
-	return 0;
+	return ret;
 }
 
 static int mddi_auo_ic_on_panel_on(struct platform_device *pdev)
@@ -344,18 +302,16 @@ static int mddi_auo_ic_on_panel_on(struct platform_device *pdev)
 	if (rd->power_ctrl) {
 		switch (rd->lcd_state) {
 		case LCD_STATE_POWER_ON:
-			auo_lcd_driver_init();
-			auo_lcd_exit_sleep();
-			auo_lcd_dbc_on(rd);
+			auo_lcd_exit_sleep(rd);
+			auo_lcd_dbc_on();
 			auo_lcd_display_on();
 			rd->lcd_state = LCD_STATE_ON;
 			break;
 
 		case LCD_STATE_SLEEP:
 			auo_lcd_exit_deepstandby(rd);
-			auo_lcd_driver_init();
-			auo_lcd_exit_sleep();
-			auo_lcd_dbc_on(rd);
+			auo_lcd_exit_sleep(rd);
+			auo_lcd_dbc_on();
 			auo_lcd_display_on();
 			rd->lcd_state = LCD_STATE_ON;
 			break;
@@ -365,18 +321,14 @@ static int mddi_auo_ic_on_panel_on(struct platform_device *pdev)
 			rd->lcd_state = LCD_STATE_ON;
 			break;
 
-		case LCD_STATE_ON:
-			break;
-
 		default:
 			break;
 		}
 	}
 	mutex_unlock(&rd->mddi_mutex);
 error:
-	return 0;
+	return ret;
 }
-
 
 static int mddi_auo_ic_off_panel_off(struct platform_device *pdev)
 {
@@ -399,7 +351,7 @@ static int mddi_auo_ic_off_panel_off(struct platform_device *pdev)
 
 		case LCD_STATE_ON:
 			auo_lcd_display_off();
-			auo_lcd_dbc_off(rd);
+			auo_lcd_dbc_off();
 			auo_lcd_enter_sleep();
 			auo_lcd_enter_deepstandby();
 			rd->lcd_state = LCD_STATE_SLEEP;
@@ -411,7 +363,7 @@ static int mddi_auo_ic_off_panel_off(struct platform_device *pdev)
 			break;
 
 		case LCD_STATE_DISPLAY_OFF:
-			auo_lcd_dbc_off(rd);
+			auo_lcd_dbc_off();
 			auo_lcd_enter_sleep();
 			auo_lcd_enter_deepstandby();
 			rd->lcd_state = LCD_STATE_SLEEP;
@@ -429,7 +381,7 @@ error:
 	return 0;
 }
 
-static ssize_t show_driver_info(struct device *dev_p,
+static ssize_t show_driver_version(struct device *dev_p,
 			struct device_attribute *attr,
 			char *buf)
 {
@@ -437,16 +389,127 @@ static ssize_t show_driver_info(struct device *dev_p,
 							MDDI_DRIVER_VERSION);
 }
 
-/* driver attributes */
-static DEVICE_ATTR(display_driver_info, 0444, show_driver_info, NULL);
+static ssize_t show_dbc_ctrl(struct device *dev_p,
+			struct device_attribute *attr,
+			char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%i\n", dbc_ctrl);
+}
+
+static ssize_t store_dbc_ctrl(struct device *dev_p,
+			struct device_attribute *attr,
+			const char *buf,
+			size_t count)
+{
+	ssize_t ret;
+	struct auo_record *rd;
+
+	rd = kzalloc(sizeof(struct auo_record), GFP_KERNEL);
+	if (rd == NULL) {
+		ret = -ENOMEM;
+		goto exit_point;
+	}
+
+	mutex_lock(&rd->mddi_mutex);
+
+	if (sscanf(buf, "%i", &ret) != 1) {
+		pr_err("%s: mddi_auo_hvga: "
+			"Invalid flag for dbc ctrl\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	if (ret)
+		dbc_ctrl = 1;
+	else
+		dbc_ctrl = 0;
+
+	ret = strnlen(buf, count);
+
+unlock:
+	mutex_unlock(&rd->mddi_mutex);
+exit_point:
+	return ret;
+}
+
+static ssize_t show_dbc_mode_ctrl(struct device *dev_p,
+				struct device_attribute *attr,
+				char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%i\n", dbc_mode);
+}
+
+static ssize_t store_dbc_mode_ctrl(struct device *dev_p,
+				struct device_attribute *attr,
+				const char *buf,
+				size_t count)
+{
+	ssize_t ret;
+	struct auo_record *rd;
+
+	rd = kzalloc(sizeof(struct auo_record), GFP_KERNEL);
+	if (rd == NULL) {
+		ret = -ENOMEM;
+		goto exit_point;
+	}
+
+	mutex_lock(&rd->mddi_mutex);
+
+	if (sscanf(buf, "%i", &ret) != 1) {
+		pr_err("%s: mddi_auo_hvga: "
+			"Invalid flag for dbc mode\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	switch (ret) {
+	case DBC_MODE_UI:
+	case DBC_MODE_IMAGE:
+	case DBC_MODE_VIDEO:
+		dbc_mode = ret;
+		break;
+	default:
+		pr_err("%s: mddi_auo_hvga: "
+			"Invalid value for dbc mode\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	if (rd->lcd_state != LCD_STATE_ON) {
+		pr_err("%s: mddi_auo_hvga: LCD in sleep, "
+			"not performing any dbc change\n", __func__);
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	/* Mobile Image Enhancement Mode */
+	write_client_reg_nbr(0x55, dbc_mode, 0, 0, 0, 1);
+
+	ret = strnlen(buf, count);
+
+unlock:
+	mutex_unlock(&rd->mddi_mutex);
+exit_point:
+	return ret;
+}
 
 static void lcd_attribute_register(struct platform_device *pdev)
 {
 	int ret;
 
-	ret = device_create_file(&pdev->dev, &dev_attr_display_driver_info);
+	ret = device_create_file(&pdev->dev, &dev_attr_display_driver_version);
 	if (ret != 0)
 		dev_err(&pdev->dev, "Failed to register display_driver_version"
+						"attributes (%d)\n", ret);
+
+	ret = device_create_file(&pdev->dev, &dev_attr_dbc_ctrl);
+	if (ret != 0)
+		dev_err(&pdev->dev, "Failed to register dbc_ctrl"
+						"attributes (%d)\n", ret);
+
+	ret = device_create_file(&pdev->dev, &dev_attr_dbc_mode);
+	if (ret != 0)
+		dev_err(&pdev->dev, "Failed to register dbc_mode"
 						"attributes (%d)\n", ret);
 }
 
@@ -504,7 +567,13 @@ static int mddi_auo_lcd_probe(struct platform_device *pdev)
 {
 	int ret = -ENODEV;
 	struct auo_record *rd;
+	struct msm_fb_panel_data *panel_data;
 
+	if (!pdev) {
+		dev_err(&pdev->dev, "%s: no platform_device\n", __func__);
+		ret = -ENODEV;
+		goto exit_point;
+	}
 	if (!pdev->dev.platform_data) {
 		dev_err(&pdev->dev, "%s: no platform data\n", __func__);
 		ret = -ENODEV;
@@ -522,27 +591,19 @@ static int mddi_auo_lcd_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, rd);
 	mutex_init(&rd->mddi_mutex);
 
+	panel_data = &auo_hvga_panel_data;
+
 	if (!check_panel_ids(rd)) {
 		rd->lcd_state = LCD_STATE_POWER_ON;
-		rd->power_ctrl = 1;
+		rd->power_ctrl = POWER_ON;
 
-		rd->pdata->panel_data->panel_info.mddi.vdopkt =
-						MDDI_DEFAULT_PRIM_PIX_ATTR;
-		rd->pdata->panel_data->panel_info.lcd.vsync_enable = TRUE;
-		rd->pdata->panel_data->panel_info.lcd.refx100 = 6500;
-		rd->pdata->panel_data->panel_info.lcd.v_back_porch = 8;
-		rd->pdata->panel_data->panel_info.lcd.v_front_porch = 8;
-		rd->pdata->panel_data->panel_info.lcd.v_pulse_width = 0;
-		rd->pdata->panel_data->panel_info.lcd.hw_vsync_mode = TRUE;
-		rd->pdata->panel_data->panel_info.lcd.vsync_notifier_period = 0;
-		rd->pdata->panel_data->on  = mddi_auo_ic_on_panel_off;
-		rd->pdata->panel_data->controller_on_panel_on =
-						mddi_auo_ic_on_panel_on;
-		rd->pdata->panel_data->off = mddi_auo_ic_off_panel_off;
-		rd->pdata->panel_data->window_adjust =
-						auo_lcd_window_adjust;
-		rd->pdata->panel_data->power_on_panel_at_pan = 0;
-		pdev->dev.platform_data = rd->pdata->panel_data;
+		panel_data->on = mddi_auo_ic_on_panel_off;
+		panel_data->controller_on_panel_on = mddi_auo_ic_on_panel_on;
+		panel_data->off = mddi_auo_ic_off_panel_off;
+		panel_data->window_adjust = auo_lcd_window_adjust;
+		panel_data->power_on_panel_at_pan = 0;
+
+		pdev->dev.platform_data = &auo_hvga_panel_data;
 
 		/* adds mfd on driver_data */
 		msm_fb_add_device(pdev);
@@ -563,9 +624,13 @@ static int __devexit mddi_auo_lcd_remove(struct platform_device *pdev)
 {
 	struct auo_record *rd;
 
-	device_remove_file(&pdev->dev, &dev_attr_display_driver_info);
+	device_remove_file(&pdev->dev, &dev_attr_display_driver_version);
+	device_remove_file(&pdev->dev, &dev_attr_dbc_ctrl);
+	device_remove_file(&pdev->dev, &dev_attr_dbc_mode);
+
 	rd = platform_get_drvdata(pdev);
-	kfree(rd);
+	if (rd)
+		kfree(rd);
 	return 0;
 };
 
@@ -573,12 +638,42 @@ static struct platform_driver this_driver = {
 	.probe  = mddi_auo_lcd_probe,
 	.remove = __devexit_p(mddi_auo_lcd_remove),
 	.driver = {
-		.name   = MDDI_AUO_S6D05A1_HVGA_NAME,
+		.name = MDDI_AUO_S6D05A1_HVGA_NAME,
 	},
 };
 
+static void __init msm_mddi_auo_hvga_display_device_init(void)
+{
+	struct msm_fb_panel_data *panel_data = &auo_hvga_panel_data;
+
+	panel_data->panel_info.xres = 320;
+	panel_data->panel_info.yres = 480;
+	panel_data->panel_info.pdest = DISPLAY_1;
+	panel_data->panel_info.type = MDDI_PANEL;
+	panel_data->panel_info.mddi.vdopkt = MDDI_DEFAULT_PRIM_PIX_ATTR;
+	panel_data->panel_info.wait_cycle = 0;
+	panel_data->panel_info.bpp = 24;
+	panel_data->panel_info.clk_rate = 192000000;
+	panel_data->panel_info.clk_min = 190000000;
+	panel_data->panel_info.clk_max = 200000000;
+	panel_data->panel_info.fb_num = 2;
+	panel_data->panel_info.bl_max = 4;
+	panel_data->panel_info.bl_min = 1;
+	panel_data->panel_info.width = 42;
+	panel_data->panel_info.height = 63;
+
+	panel_data->panel_info.lcd.vsync_enable = TRUE;
+	panel_data->panel_info.lcd.refx100 = REFRESH_RATE;
+	panel_data->panel_info.lcd.v_back_porch = 8;
+	panel_data->panel_info.lcd.v_front_porch = 8;
+	panel_data->panel_info.lcd.v_pulse_width = 0;
+	panel_data->panel_info.lcd.hw_vsync_mode = TRUE;
+	panel_data->panel_info.lcd.vsync_notifier_period = 0;
+}
+
 static int __init mddi_auo_lcd_init(void)
 {
+	msm_mddi_auo_hvga_display_device_init();
 	return platform_driver_register(&this_driver);
 }
 
@@ -589,7 +684,7 @@ static void __exit mddi_auo_lcd_exit(void)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("macro.luo@sonyericsson.com");
-MODULE_DESCRIPTION("MDDI implementation of the auo HVGA display");
+MODULE_DESCRIPTION("Driver for Samsung S6D05A1X01 with AUO HVGA panel");
 
 module_init(mddi_auo_lcd_init);
 module_exit(mddi_auo_lcd_exit);
